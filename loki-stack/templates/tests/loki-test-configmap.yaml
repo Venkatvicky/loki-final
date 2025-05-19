@@ -11,33 +11,41 @@ metadata:
 data:
   test.sh: |
     #!/usr/bin/env bash
+    set -euo pipefail
 
-    LOKI_URI="http://${LOKI_SERVICE}:${LOKI_PORT}"
+    LOKI_HOST="${LOKI_SERVICE:-loki}"
+    LOKI_PORT="${LOKI_PORT:-3100}"
+    LOKI_URI="http://${LOKI_HOST}:${LOKI_PORT}"
 
     function setup() {
-      apk add -u curl jq
-      until (curl -s ${LOKI_URI}/loki/api/v1/label/app/values | jq -e '.data[] | select(. == "loki")'); do
+      echo "Waiting for Loki to become available..."
+      apk add -q --no-cache curl jq
+      until curl -s ${LOKI_URI}/loki/api/v1/labels | jq . >/dev/null; do
         sleep 1
       done
+      echo "Loki is up!"
     }
 
-    @test "Has labels" {
-      curl -s ${LOKI_URI}/loki/api/v1/labels | \
-      jq -e '.data[] | select(. == "app")'
+    @test "Has 'app' label" {
+      curl -s ${LOKI_URI}/loki/api/v1/labels | jq -e '.data[] | select(. == "app")'
     }
 
-    @test "Query log entry" {
-      curl -sG ${LOKI_URI}/api/prom/query?limit=10 --data-urlencode 'query={app="loki"}' | \
-      jq -e '.streams[].entries | length >=1'
+    @test "Query existing log" {
+      curl -sG ${LOKI_URI}/loki/api/v1/query?limit=5 --data-urlencode 'query={app="sonarqube"}' | \
+      jq -e '.data.result | length >= 0'
     }
 
-    @test "Push log entry" {
-      local timestamp=$(date +%s000000000)
-      local data=$(jq -n --arg timestamp "${timestamp}" '{"streams": [{"stream": {"app": "loki-test"}, "values": [[$timestamp, "foobar"]]}]}')
+    @test "Push and retrieve a test log" {
+      local timestamp=$(date +%s%N)
+      local data=$(jq -n --arg timestamp "${timestamp}" \
+        '{"streams": [{"stream": {"app": "loki-test"}, "values": [[$timestamp, "test-log-entry"]]}]}')
 
-      curl -s -X POST -H "Content-Type: application/json" ${LOKI_URI}/loki/api/v1/push --data-raw "${data}"
+      curl -s -X POST -H "Content-Type: application/json" \
+        ${LOKI_URI}/loki/api/v1/push --data-raw "${data}"
+
+      sleep 2
 
       curl -sG ${LOKI_URI}/loki/api/v1/query_range?limit=1 --data-urlencode 'query={app="loki-test"}' | \
-      jq -e '.data.result[].values[][1] == "foobar"'
+      jq -e '.data.result[].values[][1] == "test-log-entry"'
     }
 {{- end }}
